@@ -1,0 +1,10 @@
+Supplier: Amber Field Studio
+Invoice Number: AF-2026-042
+Invoice Date: 2026-11-14
+Currency: EUR
+Subtotal: 290.00
+Tax: 60.90
+Total: 349.90
+Items:
+Design consultation | 2 | 95.00 | 190.00
+Artwork preparation | 1 | 100.00 | 100.00
