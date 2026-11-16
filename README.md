@@ -1,6 +1,6 @@
 # DocFlow
 
-DocFlow turns labeled invoices into validated records. An operator uploads a PDF or UTF-8 text invoice, checks the extracted fields, corrects any discrepancies and exports the reviewed data as JSON or CSV.
+DocFlow turns digital PDFs, scanned PDFs, UTF-8 invoices and structured JSON into reviewable records. Operators compare extracted values with source text, correct discrepancies, search invoice metadata and export verified records.
 
 ![DocFlow review screen showing a total mismatch in a synthetic invoice](docs/dashboard.png)
 
@@ -25,8 +25,9 @@ Open [http://127.0.0.1:8012](http://127.0.0.1:8012) and choose **Load sample**. 
 
 | Endpoint | Behavior |
 | --- | --- |
-| GET `/api/documents` | Lists up to 100 recent documents and their review states. |
-| POST `/api/documents` | Receives the raw document bytes with `Content-Type: application/pdf` or `text/plain` and a percent-encoded `X-Filename` header. A byte-identical replay returns the existing record. |
+| GET `/api/documents?q=…` | Searches filename, supplier, customer, invoice number and document type. Results are capped at 100. |
+| POST `/api/documents` | Receives up to 2 MiB of PDF, UTF-8 text or structured invoice JSON with a percent-encoded `X-Filename` header. A byte-identical replay returns the existing record. |
+| GET `/api/documents/{id}/source` | Returns the stored source text and extraction method for the selected record. |
 | POST `/api/documents/{id}/review` | Receives `{"version": 1, "invoice": {…}}` with corrected fields. Rejects stale versions and inconsistent invoices. |
 | GET `/api/documents/{id}/export?format=csv` | Downloads the validated record. Use `format=json` or omit the format for JSON. |
 
@@ -40,6 +41,10 @@ The document endpoints require an operator bearer token. The local demo uses `do
 | `OPERATOR_TOKEN` | Set a random token of at least 32 characters and disable demo mode for deployment. |
 | `DATABASE_URL` | Defaults to `sqlite:///data/docflow.db`. Use `postgresql+psycopg://…` for PostgreSQL. |
 | `MODEL_API_KEY`, `MODEL_NAME`, `MODEL_ENDPOINT` | Optional Chat Completions integration for short notes about existing validation issues. With no key, there are zero model calls. |
+| `MODEL_EXTRACTION_ENABLED` | Opt in to sending full extracted source text to the configured model for suggestions on fields the deterministic parser did not observe. |
+| `OCR_ENABLED`, `OCR_LANGUAGE` | Enable Poppler and Tesseract processing on PDF pages without text. Defaults to the English language pack when enabled. |
+| `OCR_RENDERER`, `OCR_RECOGNIZER` | Optional paths to the `pdftoppm` and `tesseract` executables. |
+| `REQUIRE_CUSTOMER`, `INVOICE_CURRENCIES` | Require a customer field or restrict validation to a comma-separated subset of supported currencies. |
 
 To run with Compose, add a URL-safe random `DOCFLOW_DB_PASSWORD` to `.env` and run `docker compose up --build`. The app is exposed on loopback. For external access, use TLS and request limits at the reverse proxy.
 
@@ -53,10 +58,10 @@ python -m pip_audit -r requirements-dev.txt
 npm --prefix web audit --audit-level=moderate
 ```
 
-The default tests use temporary SQLite databases and generate synthetic PDFs in memory. Set `DOCFLOW_TEST_DATABASE_URL` to a dedicated PostgreSQL test database with permission to create schemas to run the same cases on a server. GitHub Actions uses PostgreSQL 17.
+The default tests use temporary SQLite databases and generate synthetic digital and image-only PDFs in memory. Tests compare expected fields and validation results over three layouts. The real OCR test checks three fields from a rendered synthetic scan. Install Poppler and the Tesseract English language pack to run it locally. GitHub Actions installs both tools and requires the OCR test while running against PostgreSQL 17. Set `DOCFLOW_TEST_DATABASE_URL` to a dedicated PostgreSQL test database with permission to create schemas to run the same cases on a server.
 
 ## Scope and original work
 
-The MVP supports the labeled invoice format shown in the sample, six currencies and single-operator review. Scanned PDFs, OCR, arbitrary invoice layouts, contract extraction and accounting system integration are outside its scope. The core flow runs on FastAPI, SQLAlchemy, Pydantic, pypdf and React. The optional model provides review notes only. [Architecture](docs/architecture.md).
+Deterministic extraction supports labeled fields, common English aliases, decimal separators and pipe- or tab-delimited line items. JSON accepts the invoice schema used for export. The preview displays extracted text. Uploaded originals are discarded after processing, so keep the original available to check poor scans or unsupported layouts. The application supports one operator role and six currencies. Model extraction requires an authorized configuration and has been tested with synthetic responses. [Architecture](docs/architecture.md).
 
 Original work includes the bounded upload API, missing-field handling, exact decimal checks, replay deduplication, versioned review, audit history and safe exports. [Third-party notices](THIRD_PARTY_NOTICES.md) · [MIT license](LICENSE).
