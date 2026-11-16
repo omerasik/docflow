@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: docflow
+      POSTGRES_PASSWORD: ${DOCFLOW_DB_PASSWORD:?Set DOCFLOW_DB_PASSWORD in .env}
+      POSTGRES_DB: docflow
+    volumes:
+      - docflow-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docflow -d docflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://docflow:${DOCFLOW_DB_PASSWORD:?Set DOCFLOW_DB_PASSWORD in .env}@db:5432/docflow
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8012:8012"
+volumes:
+  docflow-db:
