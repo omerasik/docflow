@@ -2,12 +2,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import JSON, Integer, String, create_engine, select, update
+from sqlalchemy import JSON, ForeignKey, Integer, String, Text, create_engine, func, or_, select, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from .invoice import Invoice, review_issues
+from .invoice import Invoice
+from .parser import DecodedDocument
 
 
 class Base(DeclarativeBase):
@@ -36,6 +37,14 @@ class Document(Base):
         }
 
 
+class DocumentSource(Base):
+    __tablename__ = "document_sources"
+
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    method: Mapped[str] = mapped_column(String(24))
+    text: Mapped[str] = mapped_column(Text)
+
+
 def database(url: str) -> Engine:
     path = make_url(url)
     if path.get_backend_name() == "sqlite" and path.database and path.database != ":memory:":
@@ -51,15 +60,30 @@ def find_digest(session: Session, digest: str) -> Document | None:
     return session.scalar(select(Document).where(Document.digest == digest))
 
 
-def save_upload(session: Session, digest: str, filename: str, invoice: Invoice, note: str | None) -> tuple[Document, bool]:
+def list_recent(session: Session, query: str) -> list[Document]:
+    candidates = select(Document).order_by(Document.created_at.desc(), Document.id).limit(100)
+    if query:
+        columns = [Document.filename, *(Document.invoice[field].as_string()
+                    for field in ("supplier", "customer", "invoice_number", "document_type"))]
+        candidates = candidates.where(or_(*(func.lower(column).contains(query.lower(), autoescape=True)
+                                           for column in columns)))
+    return list(session.scalars(candidates))
+
+
+def save_upload(
+    session: Session, digest: str, filename: str, invoice: Invoice, note: str | None,
+    source: DecodedDocument, warnings: list[str],
+) -> tuple[Document, bool]:
     uploaded = audit_entry("Extracted")
     document = Document(
         id=str(uuid4()), digest=digest, filename=filename, status="needs_review", version=1,
-        invoice=invoice.model_dump(mode="json"), warnings=review_issues(invoice),
+        invoice=invoice.model_dump(mode="json"), warnings=warnings,
         audit=[uploaded], created_at=uploaded["at"], note=note,
     )
     session.add(document)
     try:
+        session.flush()
+        session.add(DocumentSource(document_id=document.id, method=source.method, text=source.text))
         session.commit()
         return document, False
     except IntegrityError:

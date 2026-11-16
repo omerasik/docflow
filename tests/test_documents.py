@@ -1,5 +1,7 @@
 import os
+import shutil
 from collections.abc import Iterator
+from contextlib import nullcontext
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,14 +10,18 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw, ImageFont
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
 from document_flow.app import create_app
-from document_flow.invoice import Invoice, review_issues
+from document_flow.extraction import CandidateInvoice, InvoiceModel
+from document_flow.invoice import Invoice, ReviewRules, extract_invoice, review_issues
 from document_flow.model import ReviewModel
-from document_flow.parser import MAX_BYTES
+from document_flow.ocr import TesseractOcr
+from document_flow.parser import MAX_BYTES, ParseError, decode_source
 
 token = "document-operator".ljust(35, "x")
 auth = {"Authorization": f"Bearer {token}"}
@@ -154,3 +160,101 @@ def test_review_model_receives_issues_and_fails_without_changing_invoice(monkeyp
     monkeypatch.setattr(httpx, "post", throttle)
     assert model.suggest(invoice) is None
     assert invoice.invoice_number is None
+
+
+@pytest.mark.parametrize(("source", "expected", "issue_count"), [
+    (text, {"supplier": "Example Studio", "customer": None, "invoice_number": "ST-0042", "currency": "EUR",
+            "total": "349.00", "invoice_date": "2026-11-14", "document_type": "invoice"}, 1),
+    ("Vendor = Leaf Works\nBill To: Riverside\nInvoice No.: L-41\nIssued On: 15.11.2026\n"
+     "Currency: eur\nNet Amount: 1.280,00\nVAT: 160,00\nAmount Due: 1.440,00\nLine Items:\n"
+     "Description | Qty | Unit price | Amount\nDesign | 2 | 640,00 | 1.280,00",
+     {"supplier": "Leaf Works", "customer": "Riverside", "invoice_number": "L-41", "currency": "EUR",
+      "total": "1440.00", "invoice_date": "2026-11-15", "document_type": "invoice"}, 0),
+    ("Buyer: Northwind\nInvoice ID: J-41\nIssue Date: 2026/11/12\nCurrency: USD\nTax: invalid",
+     {"supplier": None, "customer": "Northwind", "invoice_number": "J-41", "currency": "USD",
+      "total": None, "invoice_date": "2026-11-12", "document_type": "invoice"}, 5),
+])
+def test_synthetic_layout_reference_fields(source: str, expected: dict, issue_count: int):
+    invoice = extract_invoice(source)
+    actual = invoice.model_dump(mode="json")
+    assert {field: actual[field] for field in expected} == expected
+    assert len(review_issues(invoice)) == issue_count
+
+
+def test_structured_upload_search_source_and_customer_rules(client: TestClient):
+    invoice = extract_invoice(text).model_copy(update={"customer": "Riverside_25"})
+    response = upload(client, invoice.model_dump_json().encode(), "application/json")
+    assert response.status_code == 201, response.text
+    item = response.json()
+    assert item["invoice"]["customer"] == "Riverside_25"
+    assert upload(client, b'{"unknown":"field"}', "application/json").status_code == 422
+    assert review_issues(invoice, ReviewRules(currencies=frozenset({"USD"})))[-2].startswith("Currency EUR")
+    for query in ["riverside_25", "eXamPle sTudio", "0042"]:
+        assert [doc["id"] for doc in client.get("/api/documents", params={"q": query}, headers=auth).json()] == [item["id"]]
+    assert client.get("/api/documents", params={"q": "%"}, headers=auth).json() == []
+    source_path = f"/api/documents/{item['id']}/source"
+    assert client.get(source_path).status_code == 401
+    assert client.get(source_path, headers=auth).json() == {"method": "structured", "text": invoice.model_dump_json()}
+
+
+def scanned_pdf() -> bytes:
+    image = Image.new("RGB", (1200, 400), "white")
+    draw = ImageDraw.Draw(image)
+    draw.multiline_text((35, 25), "Supplier: Example Studio\nInvoice Number: ST-0042\nTotal: 349.00",
+                        fill="black", font=ImageFont.load_default(size=44), spacing=18)
+    target = BytesIO()
+    pdf = Canvas(target)
+    pdf.drawImage(ImageReader(image), 40, 540, width=515, height=172)
+    pdf.save()
+    return target.getvalue()
+
+
+def test_ocr_boundary_for_image_only_document():
+    class LocalOcr:
+        def read_pages(self, _pdf: bytes, pages: list[int]) -> dict[int, str]:
+            assert pages == [1]
+            return {1: text}
+
+    pdf = scanned_pdf()
+    with pytest.raises(ParseError, match="selectable text"):
+        decode_source(pdf, "application/pdf")
+    extracted = decode_source(pdf, "application/pdf", LocalOcr())
+    assert extracted.method == "ocr_pdf"
+    assert extract_invoice(extracted.text).supplier == "Example Studio"
+
+
+def test_real_ocr_synthetic_scan():
+    if not shutil.which("pdftoppm") or not shutil.which("tesseract"):
+        if os.getenv("DOCFLOW_REQUIRE_OCR_TEST") == "true":
+            pytest.fail("The CI OCR executables are not installed.")
+        pytest.skip("pdftoppm and tesseract are required")
+    extracted = decode_source(scanned_pdf(), "application/pdf", TesseractOcr.configure("pdftoppm", "tesseract", "eng"))
+    invoice = extract_invoice(extracted.text)
+    assert extracted.method == "ocr_pdf"
+    assert invoice.supplier == "Example Studio"
+    assert invoice.invoice_number == "ST-0042"
+    assert invoice.model_dump(mode="json")["total"] == "349.00"
+
+
+def test_structured_model_never_replaces_confirmed_or_invents_absent_values(monkeypatch: pytest.MonkeyPatch):
+    candidate = CandidateInvoice(fields={
+        "supplier": "Source Customer", "customer": "Source Customer", "total": "349.00", "invoice_number": "GUESS",
+    }, items=[{"description": "Artwork", "quantity": "1", "unit_price": "100.00", "amount": "100.00"}])
+
+    def respond(method: str, endpoint: str, **kwargs):
+        assert method == "POST"
+        assert kwargs["follow_redirects"] is False
+        assert kwargs["json"]["messages"][0]["role"] == "system"
+        return nullcontext(httpx.Response(200, request=httpx.Request(method, endpoint), json={
+            "choices": [{"finish_reason": "stop", "message": {"content": candidate.model_dump_json()}}]
+        }))
+
+    monkeypatch.setattr(httpx, "stream", respond)
+    result = InvoiceModel("https://model.invalid", "test-key", "test-model").fill_missing(
+        "Source Customer\nAmount 1349.00\nArtwork | 1 | 100.00 | 100.00", Invoice(supplier="Verified Vendor"),
+    )
+    assert result.supplier == "Verified Vendor"
+    assert result.customer == "Source Customer"
+    assert result.total is None
+    assert result.invoice_number is None
+    assert len(result.items) == 1
