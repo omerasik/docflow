@@ -3,6 +3,7 @@
 import argparse
 import json
 import time
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -17,17 +18,17 @@ def main() -> None:
     if urlparse(origin).hostname not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("The smoke test only accepts a local demo server.")
 
-    def call(path: str, data: bytes | None = None, **headers) -> bytes:
+    def call(path: str, data: bytes | None = None, *, timeout: float = 60, **headers) -> bytes:
         request = Request(origin + "/api/" + path, data=data,
                           headers={"Authorization": "Bearer docflow-local-demo", **headers})
-        with urlopen(request, timeout=60) as response:
+        with urlopen(request, timeout=timeout) as response:
             return response.read()
 
     for attempt in range(30):
         try:
-            call("health")
+            call("health", timeout=2)
             break
-        except URLError:
+        except (URLError, ConnectionError, TimeoutError, HTTPException):
             if attempt == 29:
                 raise
             time.sleep(1)
