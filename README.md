@@ -27,7 +27,7 @@ Open [http://127.0.0.1:8012](http://127.0.0.1:8012) and choose **Load sample**. 
 | --- | --- |
 | GET `/api/documents?q=…` | Searches filename, supplier, customer, invoice number and document type. Results are capped at 100. |
 | POST `/api/documents` | Receives up to 2 MiB of PDF, UTF-8 text or structured invoice JSON with a percent-encoded `X-Filename` header. A byte-identical replay returns the existing record. |
-| GET `/api/documents/{id}/source` | Returns the stored source text and extraction method for the selected record. |
+| GET `/api/documents/{id}/source` | Returns source text, extraction method and potential duplicates sharing the supplier and invoice number. |
 | POST `/api/documents/{id}/review` | Receives `{"version": 1, "invoice": {…}}` with corrected fields. Rejects stale versions and inconsistent invoices. |
 | GET `/api/documents/{id}/export?format=csv` | Downloads the validated record. Use `format=json` or omit the format for JSON. |
 
@@ -63,5 +63,7 @@ The default tests use temporary SQLite databases and generate synthetic digital 
 ## Scope and original work
 
 Deterministic extraction supports labeled fields, common English aliases, decimal separators and pipe- or tab-delimited line items. JSON accepts the invoice schema used for export. The preview displays extracted text. Uploaded originals are discarded after processing, so keep the original available to check poor scans or unsupported layouts. The application supports one operator role and six currencies. Model extraction requires an authorized configuration and has been tested with synthetic responses. [Architecture](docs/architecture.md).
+
+Byte-identical uploads return the existing record. Distinct uploads with the same normalized supplier and invoice number remain separately reviewable. The preview lists up to ten matches for the operator to inspect.
 
 Original work includes the bounded upload API, missing-field handling, exact decimal checks, replay deduplication, versioned review, audit history and safe exports. [Third-party notices](THIRD_PARTY_NOTICES.md) · [MIT license](LICENSE).

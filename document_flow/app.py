@@ -27,7 +27,9 @@ from .storage import (
     Base,
     Document,
     DocumentSource,
+    backfill_identities,
     database,
+    duplicate_candidates,
     find_digest,
     list_recent,
     save_review,
@@ -50,6 +52,7 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         Base.metadata.create_all(engine)
         try:
+            backfill_identities(engine)
             yield
         finally:
             engine.dispose()
@@ -79,12 +82,12 @@ def create_app(
     @api.get("/documents/{document_id}/source")
     def preview(document_id: UUID) -> dict:
         with Session(engine) as session:
-            source = session.get(DocumentSource, str(document_id))
-            if source is not None:
-                return {"method": source.method, "text": source.text}
-            if session.get(Document, str(document_id)) is None:
+            doc_id = str(document_id)
+            source = session.get(DocumentSource, doc_id)
+            if source is None and session.get(Document, doc_id) is None:
                 raise HTTPException(404, "Document not found.")
-            return {"method": None, "text": None}
+            return {"method": source.method if source else None, "text": source.text if source else None,
+                    "duplicate_candidates": duplicate_candidates(session, doc_id)}
 
     def ingest(data: bytes, filename: str, media_type: str) -> JSONResponse:
         digest = hashlib.sha256(data).hexdigest()

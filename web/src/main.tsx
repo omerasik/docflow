@@ -9,7 +9,8 @@ type Invoice = {
   supplier: string | null; customer?: string | null; document_type?: string | null; invoice_number: string | null; invoice_date: string | null;
   currency: string | null; subtotal: string | null; tax: string | null; total: string | null; items: Item[];
 };
-type Source = { method: string | null; text: string | null };
+type Source = { method: string | null; text: string | null;
+  duplicate_candidates: { id: string; filename: string; status: Document["status"] }[] };
 const sourceLabels: Record<string, string> = {
   text: "UTF-8 text", digital_pdf: "PDF text layer", digital_pdf_partial: "Partial PDF text layer",
   ocr_pdf: "PDF with OCR", structured: "Structured JSON"
@@ -68,6 +69,7 @@ function App() {
   const [source, setSource] = useState<Source | null>(null);
   const [sourceError, setSourceError] = useState("");
   const selectedId = selected?.id;
+  const selectedVersion = selected?.version;
 
   useEffect(() => {
     if (!selectedId || !token) return;
@@ -77,7 +79,7 @@ function App() {
       .then((preview: Source) => { if (!controller.signal.aborted) setSource(preview); })
       .catch(() => { if (!controller.signal.aborted) setSourceError("The source preview could not be loaded."); });
     return () => controller.abort();
-  }, [selectedId, token]);
+  }, [selectedId, selectedVersion, token]);
 
   function select(item: Document) {
     if (item.id !== selectedId) {
@@ -270,6 +272,10 @@ function App() {
           {!selected || !invoice ? <p className="empty">Upload an invoice to review its extracted fields.</p> :
             <div className="paper">
               {!!issues.length && <div className="warnings"><h3>Validation issues</h3><ul>{issues.map(issue => <li key={issue}>{issue}</li>)}</ul></div>}
+              {!!source?.duplicate_candidates?.length && <div className="warnings">
+                <h3>Possible duplicate invoices</h3><p>These documents share the supplier and invoice number.</p>
+                <ul>{source.duplicate_candidates.map(item => <li key={item.id}>{item.filename} · {item.status === "validated" ? "Validated" : "Needs review"}</li>)}</ul>
+              </div>}
               {selected.note && <p className="model-note"><strong>Model review note</strong> {selected.note}</p>}
               <div className="check-source">
               <section className="source-preview" aria-label="Extracted source">

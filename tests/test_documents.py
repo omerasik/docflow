@@ -15,6 +15,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 
 from document_flow.app import create_app
 from document_flow.extraction import CandidateInvoice, InvoiceModel
@@ -22,6 +23,7 @@ from document_flow.invoice import Invoice, ReviewRules, extract_invoice, review_
 from document_flow.model import ReviewModel
 from document_flow.ocr import TesseractOcr
 from document_flow.parser import MAX_BYTES, ParseError, decode_source
+from document_flow.storage import Document
 
 token = "document-operator".ljust(35, "x")
 auth = {"Authorization": f"Bearer {token}"}
@@ -194,7 +196,45 @@ def test_structured_upload_search_source_and_customer_rules(client: TestClient):
     assert client.get("/api/documents", params={"q": "%"}, headers=auth).json() == []
     source_path = f"/api/documents/{item['id']}/source"
     assert client.get(source_path).status_code == 401
-    assert client.get(source_path, headers=auth).json() == {"method": "structured", "text": invoice.model_dump_json()}
+    assert client.get(source_path, headers=auth).json() == {
+        "method": "structured", "text": invoice.model_dump_json(), "duplicate_candidates": []
+    }
+
+
+def test_finds_duplicates_across_layouts_and_updates_identity_after_review(client: TestClient):
+    original = text.replace("Supplier: Example Studio", "Supplier: Été Studio")
+    alternate = text.replace("Supplier: Example Studio", "Vendor: E\u0301TE\u0301  STUDIO")
+    first = upload(client, original.encode()).json()
+    second = upload(client, alternate.encode()).json()
+    assert first["id"] != second["id"]
+    path = f"/api/documents/{first['id']}/source"
+    assert client.get(path, headers=auth).json()["duplicate_candidates"] == [
+        {"id": second["id"], "filename": "sample", "status": "needs_review"}
+    ]
+    reviewed = {**second["invoice"], "invoice_number": "ST-0080", "total": "350.90"}
+    result = client.post(f"/api/documents/{second['id']}/review", headers=auth,
+                         json={"version": second["version"], "invoice": reviewed})
+    assert result.status_code == 200
+    assert client.get(path, headers=auth).json()["duplicate_candidates"] == []
+
+
+def test_populates_identity_for_legacy_documents():
+    with TemporaryDirectory() as directory:
+        url = "sqlite:///" + (Path(directory) / "legacy.db").as_posix()
+        engine = create_engine(url)
+        Document.__table__.create(engine)
+        identifier = str(uuid4())
+        with Session(engine) as session:
+            session.add(Document(id=identifier, digest="a" * 64, filename="legacy.txt", status="needs_review",
+                                 version=1, invoice=extract_invoice(text).model_dump(mode="json"), warnings=[],
+                                 audit=[], created_at="2026-10-01T12:00:00+00:00"))
+            session.commit()
+        engine.dispose()
+        with TestClient(create_app(url=url, token=token)) as client:
+            latest = upload(client).json()
+            result = client.get(f"/api/documents/{latest['id']}/source", headers=auth)
+            assert result.json()["duplicate_candidates"][0]["id"] == identifier
+            assert client.get(f"/api/documents/{identifier}/source", headers=auth).json()["text"] is None
 
 
 def scanned_pdf() -> bytes:
