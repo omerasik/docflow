@@ -17,9 +17,11 @@ Copy-Item .env.example .env
 .venv/Scripts/python -m uvicorn document_flow.app:from_env --factory --env-file .env --host 127.0.0.1 --port 8012
 ```
 
-On Linux and macOS, use `.venv/bin/python` and `cp .env.example .env`. For frontend development, run the backend and `npm --prefix web run dev`. Vite proxies the API to port 8012.
+On Linux and macOS, use `.venv/bin/python` and `cp .env.example .env`. For frontend development, run the backend and `npm --prefix web run dev`. The loopback development server at port 5173 rebuilds changed assets and proxies the API to port 8012; refresh the browser after edits. Production assets are built with esbuild and strict TypeScript checking.
 
 Open [http://127.0.0.1:8012](http://127.0.0.1:8012) and choose **Load sample**. The invoice has a deliberate total error. Set **Total** to `350.90`, select **Validate invoice**, and download either export. The same [sample file](samples/invoice.txt) can be uploaded manually.
+
+For a real OCR demonstration, install Poppler and Tesseract with English data, set `OCR_ENABLED=true`, and restart the backend. On Windows, use the installer linked by the [Tesseract installation documentation](https://tesseract-ocr.github.io/tessdoc/Installation.html) and configure `OCR_RENDERER` and `OCR_RECOGNIZER` when the executables are not on PATH. Run `python samples/generate_scan.py` with the development dependencies, then upload `samples/scanned-invoice.pdf`. This file has an image only, with no selectable text. Compare the OCR values, correct **Total** from `349.90` to `350.90`, validate and export from the browser.
 
 ## API
 
@@ -48,6 +50,8 @@ The document endpoints require an operator bearer token. The local demo uses `do
 
 To run with Compose, add a URL-safe random `DOCFLOW_DB_PASSWORD` to `.env` and run `docker compose up --build`. The app is exposed on loopback. For external access, use TLS and request limits at the reverse proxy.
 
+With a local demo server and OCR enabled, `python scripts/smoke.py` uploads the generated scan and verifies correction plus both export formats. CI runs the same check inside the built Docker image on an isolated loopback port. The script accepts loopback destinations only and uses the public demo token.
+
 ## Verification
 
 ```sh
@@ -58,7 +62,7 @@ python -m pip_audit -r requirements-dev.txt
 npm --prefix web audit --audit-level=moderate
 ```
 
-The default tests use temporary SQLite databases and generate synthetic digital and image-only PDFs in memory. Tests compare expected fields and validation results over three layouts. The real OCR test checks three fields from a rendered synthetic scan. Install Poppler and the Tesseract English language pack to run it locally. GitHub Actions installs both tools and requires the OCR test while running against PostgreSQL 17. Set `DOCFLOW_TEST_DATABASE_URL` to a dedicated PostgreSQL test database with permission to create schemas to run the same cases on a server.
+The default tests use temporary SQLite databases and generate synthetic digital and image-only PDFs in memory. Tests compare expected fields and validation results over three layouts. The real OCR test reads a complete generated scan, including two line items and the expected total mismatch. Install Poppler and the Tesseract English language pack to run it locally. GitHub Actions installs both tools and requires the OCR test while running against PostgreSQL 17. Set `DOCFLOW_TEST_DATABASE_URL` to a dedicated PostgreSQL test database with permission to create schemas to run the same cases on a server.
 
 ## Scope and original work
 

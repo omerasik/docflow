@@ -10,8 +10,6 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image, ImageDraw, ImageFont
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen.canvas import Canvas
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
@@ -24,6 +22,7 @@ from document_flow.model import ReviewModel
 from document_flow.ocr import TesseractOcr
 from document_flow.parser import MAX_BYTES, ParseError, decode_source
 from document_flow.storage import Document
+from samples.generate_scan import scanned_pdf
 
 token = "document-operator".ljust(35, "x")
 auth = {"Authorization": f"Bearer {token}"}
@@ -237,18 +236,6 @@ def test_populates_identity_for_legacy_documents():
             assert client.get(f"/api/documents/{identifier}/source", headers=auth).json()["text"] is None
 
 
-def scanned_pdf() -> bytes:
-    image = Image.new("RGB", (1200, 400), "white")
-    draw = ImageDraw.Draw(image)
-    draw.multiline_text((35, 25), "Supplier: Example Studio\nInvoice Number: ST-0042\nTotal: 349.00",
-                        fill="black", font=ImageFont.load_default(size=44), spacing=18)
-    target = BytesIO()
-    pdf = Canvas(target)
-    pdf.drawImage(ImageReader(image), 40, 540, width=515, height=172)
-    pdf.save()
-    return target.getvalue()
-
-
 def test_ocr_boundary_for_image_only_document():
     class LocalOcr:
         def read_pages(self, _pdf: bytes, pages: list[int]) -> dict[int, str]:
@@ -271,9 +258,11 @@ def test_real_ocr_synthetic_scan():
     extracted = decode_source(scanned_pdf(), "application/pdf", TesseractOcr.configure("pdftoppm", "tesseract", "eng"))
     invoice = extract_invoice(extracted.text)
     assert extracted.method == "ocr_pdf"
-    assert invoice.supplier == "Example Studio"
-    assert invoice.invoice_number == "ST-0042"
-    assert invoice.model_dump(mode="json")["total"] == "349.00"
+    assert invoice.supplier == "Amber Field Studio"
+    assert invoice.invoice_number == "AF-2026-042"
+    assert invoice.model_dump(mode="json")["total"] == "349.90"
+    assert len(invoice.items) == 2
+    assert review_issues(invoice) == ["Subtotal plus tax is 350.90 and differs from total."]
 
 
 def test_structured_model_never_replaces_confirmed_or_invents_absent_values(monkeypatch: pytest.MonkeyPatch):
