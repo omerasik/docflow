@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import sampleInvoice from "../../samples/invoice.txt?raw";
+import sampleInvoice from "../../samples/invoice.txt";
 import "./style.css";
 
 type Item = { description: string | null; quantity: string | null; unit_price: string | null; amount: string | null };
