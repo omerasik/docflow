@@ -2,6 +2,7 @@ import os
 import shutil
 from collections.abc import Iterator
 from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,7 +22,7 @@ from document_flow.invoice import Invoice, ReviewRules, extract_invoice, review_
 from document_flow.model import ReviewModel
 from document_flow.ocr import TesseractOcr
 from document_flow.parser import MAX_BYTES, ParseError, decode_source
-from document_flow.storage import Document
+from document_flow.storage import Document, DocumentSource, InvoiceIdentity, OriginalSource, expire_sources
 from samples.generate_scan import scanned_pdf
 
 token = "document-operator".ljust(35, "x")
@@ -195,9 +196,80 @@ def test_structured_upload_search_source_and_customer_rules(client: TestClient):
     assert client.get("/api/documents", params={"q": "%"}, headers=auth).json() == []
     source_path = f"/api/documents/{item['id']}/source"
     assert client.get(source_path).status_code == 401
-    assert client.get(source_path, headers=auth).json() == {
+    preview = client.get(source_path, headers=auth).json()
+    assert preview.pop("original_available") is True
+    assert datetime.fromisoformat(preview.pop("expires_at")) > datetime.now(UTC) + timedelta(days=6)
+    assert preview == {
         "method": "structured", "text": invoice.model_dump_json(), "duplicate_candidates": []
     }
+
+
+def test_original_download_retention_and_stale_deletion(client: TestClient):
+    document = upload(client).json()
+    path = f"/api/documents/{document['id']}"
+    assert client.get(path + "/original").status_code == 401
+    original = client.get(path + "/original", headers=auth)
+    assert original.status_code == 200
+    assert original.content == text.encode()
+    assert original.headers["content-disposition"].startswith("attachment;")
+    assert original.headers["content-security-policy"].startswith("sandbox")
+    assert client.delete(path + "/source?version=1").status_code == 401
+    assert client.delete(path + "/source?version=2", headers=auth).status_code == 409
+    assert client.get(path + "/source", headers=auth).json()["original_available"] is True
+    removed = client.delete(path + "/source?version=1", headers=auth)
+    assert removed.status_code == 200
+    assert removed.json()["version"] == 2
+    assert removed.json()["audit"][-1]["action"] == "Source removed by operator"
+    assert client.get(path + "/original", headers=auth).status_code == 410
+    assert client.get(path + "/source", headers=auth).json()["text"] is None
+    assert client.get("/api/documents", headers=auth).json()[0]["invoice"] == document["invoice"]
+    assert client.delete(path + "?version=1", headers=auth).status_code == 409
+    assert client.delete(path + "?version=2", headers=auth).status_code == 204
+    assert client.get("/api/documents", headers=auth).json() == []
+    assert client.get(path + "/source", headers=auth).status_code == 404
+    assert upload(client).status_code == 201
+
+
+def test_expiration_and_full_deletion_remove_all_linked_source_records():
+    with TemporaryDirectory() as directory:
+        url = "sqlite:///" + (Path(directory) / "retention.db").as_posix()
+        with TestClient(create_app(url=url, token=token)) as client:
+            document = upload(client).json()
+            path = f"/api/documents/{document['id']}"
+            engine = create_engine(url)
+            with Session(engine) as session:
+                expire_sources(session, datetime.now(UTC) + timedelta(days=8))
+                assert session.get(DocumentSource, document["id"]) is None
+                assert session.get(OriginalSource, document["id"]) is None
+                assert session.get(InvoiceIdentity, document["id"]) is not None
+                assert session.get(Document, document["id"]).audit[-1]["action"] == "Source expired"
+            assert client.get(path + "/original", headers=auth).status_code == 410
+            assert client.delete(path + "?version=2", headers=auth).status_code == 204
+            with Session(engine) as session:
+                for table in (Document, DocumentSource, OriginalSource, InvoiceIdentity):
+                    assert session.get(table, document["id"]) is None
+            engine.dispose()
+
+
+def test_backfills_retention_for_legacy_source_without_inventing_an_original():
+    with TemporaryDirectory() as directory:
+        url = "sqlite:///" + (Path(directory) / "legacy-source.db").as_posix()
+        with TestClient(create_app(url=url, token=token)) as client:
+            document = upload(client).json()
+        engine = create_engine(url)
+        with Session(engine) as session:
+            original = session.get(OriginalSource, document["id"])
+            session.delete(original)
+            session.get(Document, document["id"]).created_at = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+            session.commit()
+        engine.dispose()
+        with TestClient(create_app(url=url, token=token)) as restarted:
+            path = f"/api/documents/{document['id']}"
+            assert restarted.get(path + "/source", headers=auth).json()["text"] is None
+            assert restarted.get(path + "/original", headers=auth).status_code == 410
+            item = restarted.get("/api/documents", headers=auth).json()[0]
+            assert item["invoice"] == document["invoice"]
+            assert item["audit"][-1]["action"] == "Source expired"
 
 
 def test_finds_duplicates_across_layouts_and_updates_identity_after_review(client: TestClient):

@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, get_args
 from urllib.parse import unquote, urlparse
@@ -27,11 +28,16 @@ from .storage import (
     Base,
     Document,
     DocumentSource,
+    OriginalSource,
     backfill_identities,
+    backfill_retention,
     database,
+    delete_document,
     duplicate_candidates,
+    expire_sources,
     find_digest,
     list_recent,
+    purge_source,
     save_review,
     save_upload,
 )
@@ -42,10 +48,12 @@ DEMO_TOKEN = "docflow-local-demo"
 def create_app(
     *, url: str, token: str, demo: bool = False, model: ReviewModel | None = None,
     web_path: Path | None = None, ocr: OcrEngine | None = None, rules: ReviewRules = ReviewRules(),
-    extractor: InvoiceModel | None = None,
+    extractor: InvoiceModel | None = None, retention_days: int = 7,
 ) -> FastAPI:
     if not demo and len(token) < 32:
         raise ValueError("Set OPERATOR_TOKEN to a random token of at least 32 characters.")
+    if not 1 <= retention_days <= 365:
+        raise ValueError("SOURCE_RETENTION_DAYS must be between 1 and 365.")
     engine = database(url)
 
     @asynccontextmanager
@@ -53,6 +61,7 @@ def create_app(
         Base.metadata.create_all(engine)
         try:
             backfill_identities(engine)
+            backfill_retention(engine, retention_days)
             yield
         finally:
             engine.dispose()
@@ -77,21 +86,61 @@ def create_app(
     @api.get("/documents")
     def list_documents(q: str = Query(default="", max_length=120)) -> list[dict]:
         with Session(engine) as session:
+            expire_sources(session)
             return [document.view() for document in list_recent(session, q.strip())]
 
     @api.get("/documents/{document_id}/source")
     def preview(document_id: UUID) -> dict:
         with Session(engine) as session:
+            expire_sources(session)
             doc_id = str(document_id)
             source = session.get(DocumentSource, doc_id)
+            original = session.get(OriginalSource, doc_id)
             if source is None and session.get(Document, doc_id) is None:
                 raise HTTPException(404, "Document not found.")
+            if original is not None and original.expires_at <= datetime.now(UTC).isoformat():
+                source = None
+                original = None
             return {"method": source.method if source else None, "text": source.text if source else None,
+                    "original_available": original is not None and original.content is not None,
+                    "expires_at": original.expires_at if original else None,
                     "duplicate_candidates": duplicate_candidates(session, doc_id)}
+
+    @api.get("/documents/{document_id}/original")
+    def original_document(document_id: UUID) -> Response:
+        with Session(engine) as session:
+            expire_sources(session)
+            original = session.get(OriginalSource, str(document_id))
+            if original is None or original.content is None or original.expires_at <= datetime.now(UTC).isoformat():
+                raise HTTPException(410, "The original is unavailable or its retention period expired.")
+            extension = {"application/pdf": "pdf", "application/json": "json", "text/plain": "txt"}[original.media_type]
+            return Response(original.content, media_type=original.media_type, headers={
+                "Content-Disposition": f'attachment; filename="source-{document_id}.{extension}"',
+                "Content-Security-Policy": "sandbox; default-src 'none'",
+            })
+
+    @api.delete("/documents/{document_id}/source")
+    def remove_source(document_id: UUID, version: int = Query(ge=1, le=2_147_483_646)) -> dict:
+        with Session(engine) as session:
+            document = session.get(Document, str(document_id))
+            if document is None:
+                raise HTTPException(404, "Document not found.")
+            changed = purge_source(session, document, version, "Source removed by operator")
+            if changed is None:
+                raise HTTPException(409, "The document changed. Reload before removing its source.")
+            return changed.view()
+
+    @api.delete("/documents/{document_id}")
+    def remove_document(document_id: UUID, version: int = Query(ge=1, le=2_147_483_646)) -> Response:
+        with Session(engine) as session:
+            if not delete_document(session, str(document_id), version):
+                raise HTTPException(409, "The document changed or was already deleted. Reload the queue.")
+        return Response(status_code=204)
 
     def ingest(data: bytes, filename: str, media_type: str) -> JSONResponse:
         digest = hashlib.sha256(data).hexdigest()
         with Session(engine) as session:
+            expire_sources(session)
             existing = find_digest(session, digest)
             if existing:
                 return JSONResponse({**existing.view(), "duplicate": True}, status_code=200)
@@ -116,7 +165,8 @@ def create_app(
             warnings.append("Some pages have no readable text. Enable OCR or verify the missing pages separately.")
         note = model.suggest(extracted) if model is not None and warnings else None
         with Session(engine) as session:
-            document, duplicate = save_upload(session, digest, filename, extracted, note, source, warnings)
+            document, duplicate = save_upload(session, digest, filename, extracted, note, source, warnings,
+                                              original=data, media_type=media_type, retention_days=retention_days)
             return JSONResponse({**document.view(), "duplicate": duplicate}, status_code=200 if duplicate else 201)
 
     @api.post("/documents")
@@ -223,5 +273,6 @@ def from_env() -> FastAPI:
         url=os.getenv("DATABASE_URL", "sqlite:///data/docflow.db"), token=token, demo=demo, model=model,
         ocr=ocr, rules=ReviewRules(os.getenv("REQUIRE_CUSTOMER") == "true", currencies),
         extractor=extractor,
+        retention_days=int(os.getenv("SOURCE_RETENTION_DAYS", "7")),
         web_path=Path(__file__).resolve().parent.parent / "web" / "dist",
     )

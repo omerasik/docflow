@@ -30,6 +30,9 @@ For a real OCR demonstration, install Poppler and Tesseract with English data, s
 | GET `/api/documents?q=…` | Searches filename, supplier, customer, invoice number and document type. Results are capped at 100. |
 | POST `/api/documents` | Receives up to 2 MiB of PDF, UTF-8 text or structured invoice JSON with a percent-encoded `X-Filename` header. A byte-identical replay returns the existing record. |
 | GET `/api/documents/{id}/source` | Returns source text, extraction method and potential duplicates sharing the supplier and invoice number. |
+| GET `/api/documents/{id}/original` | Authenticated attachment download of the original bytes during retention; returns 410 when unavailable. |
+| DELETE `/api/documents/{id}/source?version=…` | Removes the original and extracted source text, preserves invoice fields and records an audit event. |
+| DELETE `/api/documents/{id}?version=…` | Permanently removes the invoice, its audit history, retained source and duplicate index entry. |
 | POST `/api/documents/{id}/review` | Receives `{"version": 1, "invoice": {…}}` with corrected fields. Rejects stale versions and inconsistent invoices. |
 | GET `/api/documents/{id}/export?format=csv` | Downloads the validated record. Use `format=json` or omit the format for JSON. |
 
@@ -47,10 +50,17 @@ The document endpoints require an operator bearer token. The local demo uses `do
 | `OCR_ENABLED`, `OCR_LANGUAGE` | Enable Poppler and Tesseract processing on PDF pages without text. Defaults to the English language pack when enabled. |
 | `OCR_RENDERER`, `OCR_RECOGNIZER` | Optional paths to the `pdftoppm` and `tesseract` executables. |
 | `REQUIRE_CUSTOMER`, `INVOICE_CURRENCIES` | Require a customer field or restrict validation to a comma-separated subset of supported currencies. |
+| `SOURCE_RETENTION_DAYS` | Original-byte and extracted-text retention for new uploads, from 1 to 365 days; defaults to 7. |
 
 To run with Compose, add a URL-safe random `DOCFLOW_DB_PASSWORD` to `.env` and run `docker compose up --build`. The app is exposed on loopback. For external access, use TLS and request limits at the reverse proxy.
 
-With a local demo server and OCR enabled, `python scripts/smoke.py` uploads the generated scan and verifies correction plus both export formats. CI runs the same check inside the built Docker image on an isolated loopback port. The script accepts loopback destinations only and uses the public demo token.
+With a local demo server and OCR enabled, `python scripts/smoke.py` uploads the generated scan, verifies correction, exports and exact original bytes, exercises source removal, and deletes its synthetic invoice. CI runs the same check inside the built Docker image on an isolated loopback port. The script accepts loopback destinations only and uses the public demo token.
+
+## Source retention
+
+The authenticated review screen offers **Download original** while the original bytes are retained. Downloads use a generated attachment filename, `nosniff` and a restrictive sandbox policy. Source text and raw bytes share the displayed expiry. Expired sources cannot be downloaded or previewed; physical cleanup runs in batches on startup and operator reads/uploads. Reviewed invoice fields remain until the operator chooses **Delete invoice**.
+
+**Remove retained source** confirms deletion of the original and extracted text while preserving the invoice and audit trail. **Delete invoice** separately confirms removal of the full record. Both operations require the current version and reject stale requests. Legacy text previews receive an expiry based on their upload date; discarded historical originals cannot be restored. Reuploading identical bytes returns the existing record and does not restore removed source data. Retention applies to the active application database; operators must manage database backups separately.
 
 ## Verification
 
@@ -66,7 +76,7 @@ The default tests use temporary SQLite databases and generate synthetic digital 
 
 ## Scope and original work
 
-Deterministic extraction supports labeled fields, common English aliases, decimal separators and pipe- or tab-delimited line items. JSON accepts the invoice schema used for export. The preview displays extracted text. Uploaded originals are discarded after processing, so keep the original available to check poor scans or unsupported layouts. The application supports one operator role and six currencies. Model extraction requires an authorized configuration and has been tested with synthetic responses. [Architecture](docs/architecture.md).
+Deterministic extraction supports labeled fields, common English aliases, decimal separators and pipe- or tab-delimited line items. JSON accepts the invoice schema used for export. The preview displays extracted text and offers an authenticated original attachment during retention. The application supports one operator role and six currencies. Model extraction requires an authorized configuration and has been tested with synthetic responses. [Architecture](docs/architecture.md).
 
 Byte-identical uploads return the existing record. Distinct uploads with the same normalized supplier and invoice number remain separately reviewable. The preview lists up to ten matches for the operator to inspect.
 
