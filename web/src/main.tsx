@@ -9,7 +9,7 @@ type Invoice = {
   supplier: string | null; customer?: string | null; document_type?: string | null; invoice_number: string | null; invoice_date: string | null;
   currency: string | null; subtotal: string | null; tax: string | null; total: string | null; items: Item[];
 };
-type Source = { method: string | null; text: string | null;
+type Source = { method: string | null; text: string | null; original_available: boolean; expires_at: string | null;
   duplicate_candidates: { id: string; filename: string; status: Document["status"] }[] };
 const sourceLabels: Record<string, string> = {
   text: "UTF-8 text", digital_pdf: "PDF text layer", digital_pdf_partial: "Partial PDF text layer",
@@ -205,6 +205,47 @@ function App() {
     });
   }
 
+  async function downloadOriginal() {
+    if (!selected) return;
+    await run("Preparing original", async () => {
+      const response = await request("documents/" + selected.id + "/original", token);
+      const mime = response.headers.get("Content-Type")?.split(";")[0];
+      const extension = mime === "application/pdf" ? "pdf" : mime === "application/json" ? "json" : "txt";
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "source-" + selected.id + "." + extension;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    });
+  }
+
+  async function removeSource() {
+    if (!selected || !window.confirm("Permanently remove the original and extracted source text? Reviewed invoice fields remain available.")) return;
+    await run("Removing source", async () => {
+      const response = await request("documents/" + selected.id + "/source?version=" + selected.version, token, { method: "DELETE" });
+      const item: Document = await response.json();
+      setDocuments(previous => previous.map(document => document.id === item.id ? item : document));
+      setMatches(previous => previous?.map(document => document.id === item.id ? item : document) ?? null);
+      setSource(null);
+      select(item);
+      setNotice("Original and extracted source removed. Reviewed fields are retained.");
+    });
+  }
+
+  async function removeDocument() {
+    if (!selected || !window.confirm("Permanently delete this invoice, its original, source text and audit history?")) return;
+    await run("Deleting invoice", async () => {
+      await request("documents/" + selected.id + "?version=" + selected.version, token, { method: "DELETE" });
+      const remaining = documents.filter(document => document.id !== selected.id);
+      setDocuments(remaining);
+      setMatches(previous => previous?.filter(document => document.id !== selected.id) ?? null);
+      setSelected(null); setInvoice(null); setSource(null); setIssues([]);
+      if (remaining[0]) select(remaining[0]);
+      setNotice("Invoice and retained source deleted.");
+    });
+  }
+
   function field(name: Exclude<keyof Invoice, "items">, label: string, type = "text"): ReactNode {
     return <label key={name}><span>{label}</span><input type={type} value={invoice?.[name] ?? ""} onChange={event => {
       const value = event.target.value || null;
@@ -283,6 +324,11 @@ function App() {
                 {sourceError ? <p role="alert">{sourceError}</p> :
                   source?.text ? <><small>{sourceLabels[source.method ?? ""] ?? source.method}</small><pre>{source.text}</pre></> :
                     <p>{source ? "Source text was unavailable for this upload." : "Loading source…"}</p>}
+                {source?.expires_at && <p>Source retained until {date.format(new Date(source.expires_at))} UTC.</p>}
+                <div className="source-controls">
+                  {source?.original_available && <button type="button" disabled={!!busy} onClick={() => void downloadOriginal()}>Download original</button>}
+                  {(source?.text || source?.original_available) && <button type="button" disabled={!!busy} onClick={() => void removeSource()}>Remove retained source</button>}
+                </div>
               </section>
               <form onSubmit={validate}>
                 <fieldset disabled={!!busy || selected.status === "validated"}>
@@ -316,6 +362,7 @@ function App() {
               </div>
               {selected.status === "validated" && <div className="exports"><button onClick={() => void download("json")} disabled={!!busy}>Export JSON</button><button className="primary" onClick={() => void download("csv")} disabled={!!busy}>Export CSV</button></div>}
               <div className="history"><h3>Audit history</h3>{selected.audit.map((entry, index) => <p key={index}>{entry.action} <time dateTime={entry.at}>{date.format(new Date(entry.at))}</time></p>)}</div>
+              <div className="source-controls"><button type="button" disabled={!!busy} onClick={() => void removeDocument()}>Delete invoice</button></div>
             </div>}
         </section>
       </div>}

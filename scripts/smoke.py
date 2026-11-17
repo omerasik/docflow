@@ -18,8 +18,8 @@ def main() -> None:
     if urlparse(origin).hostname not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("The smoke test only accepts a local demo server.")
 
-    def call(path: str, data: bytes | None = None, *, timeout: float = 60, **headers) -> bytes:
-        request = Request(origin + "/api/" + path, data=data,
+    def call(path: str, data: bytes | None = None, *, timeout: float = 60, method: str | None = None, **headers) -> bytes:
+        request = Request(origin + "/api/" + path, data=data, method=method,
                           headers={"Authorization": "Bearer docflow-local-demo", **headers})
         with urlopen(request, timeout=timeout) as response:
             return response.read()
@@ -47,9 +47,16 @@ def main() -> None:
             "version": document["version"], "invoice": document["invoice"],
         }).encode(), **{"Content-Type": "application/json"}))
         assert result["status"] == "validated"
+        document = result
     assert json.loads(call(path + "/export"))["total"] == "350.90"
     assert b"Design consultation" in call(path + "/export?format=csv")
-    print("PASS: native OCR upload, source preview, decimal correction, validation and JSON/CSV exports")
+    assert call(path + "/original") == scan.read_bytes()
+    removed = json.loads(call(path + "/source?version=" + str(document["version"]), method="DELETE"))
+    assert json.loads(call(path + "/source"))["text"] is None
+    assert json.loads(call(path + "/export"))["total"] == "350.90"
+    call(path + "?version=" + str(removed["version"]), method="DELETE")
+    assert all(item["id"] != document["id"] for item in json.loads(call("documents")))
+    print("PASS: native OCR, correction, exports, exact original, source retention controls and sample cleanup")
 
 
 if __name__ == "__main__":

@@ -80,4 +80,6 @@ th { color: var(--muted); font-size: 11px; font-weight: 640; border-bottom: 1px 
 .source-preview { min-width: 0; padding: 12px; border: 1px solid #ccd5e1; border-radius: 8px; }
 .source-preview pre { margin: 10px 0 0; max-height: 48vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .check-source form { min-width: 0; }
+.source-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.source-preview p { margin-top: 10px; font-size: 12px; }
 @media (max-width: 1080px) { .check-source { grid-template-columns: minmax(0, 1fr); } }

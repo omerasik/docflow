@@ -1,10 +1,23 @@
 import hashlib
 import unicodedata
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import JSON, ForeignKey, Integer, String, Text, create_engine, func, or_, select, update
+from sqlalchemy import (
+    JSON,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    create_engine,
+    delete,
+    func,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine, make_url
@@ -54,6 +67,69 @@ class InvoiceIdentity(Base):
 
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
     identity: Mapped[str | None] = mapped_column(String(64), index=True)
+
+
+class OriginalSource(Base):
+    __tablename__ = "original_sources"
+
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    media_type: Mapped[str | None] = mapped_column(String(32))
+    content: Mapped[bytes | None] = mapped_column(LargeBinary)
+    expires_at: Mapped[str] = mapped_column(String(40), index=True)
+
+
+def backfill_retention(engine: Engine, days: int) -> None:
+    insert = postgres_insert if engine.dialect.name == "postgresql" else sqlite_insert
+    with Session(engine) as session:
+        pending = select(Document.id, Document.created_at).join(
+            DocumentSource, DocumentSource.document_id == Document.id,
+        ).outerjoin(OriginalSource, OriginalSource.document_id == Document.id).where(
+            OriginalSource.document_id.is_(None),
+        ).limit(500)
+        while rows := session.execute(pending).all():
+            session.execute(insert(OriginalSource).on_conflict_do_nothing(index_elements=["document_id"]), [
+                {"document_id": row.id, "content": None, "media_type": None,
+                 "expires_at": (datetime.fromisoformat(row.created_at) + timedelta(days=days)).isoformat()}
+                for row in rows
+            ])
+            session.commit()
+        expire_sources(session)
+
+
+def purge_source(session: Session, document: Document, version: int, action: str) -> Document | None:
+    changed = session.execute(update(Document).where(Document.id == document.id, Document.version == version).values(
+        version=version + 1, audit=[*document.audit, audit_entry(action)],
+    ).returning(Document)).scalar_one_or_none()
+    if changed is None:
+        session.rollback()
+        return None
+    for table in (DocumentSource, OriginalSource):
+        session.execute(delete(table).where(table.document_id == document.id))
+    session.commit()
+    return changed
+
+
+def expire_sources(session: Session, now: datetime | None = None) -> None:
+    cutoff = (now or datetime.now(UTC)).isoformat()
+    identifiers = list(session.scalars(select(OriginalSource.document_id).where(
+        OriginalSource.expires_at <= cutoff,
+    ).limit(500)))
+    for identifier in identifiers:
+        document = session.get(Document, identifier)
+        if document is not None:
+            purge_source(session, document, document.version, "Source expired")
+
+
+def delete_document(session: Session, document_id: str, version: int) -> bool:
+    removed = session.execute(delete(Document).where(Document.id == document_id, Document.version == version)
+                              .returning(Document.id)).scalar_one_or_none()
+    if removed is None:
+        session.rollback()
+        return False
+    for table in (DocumentSource, OriginalSource, InvoiceIdentity):
+        session.execute(delete(table).where(table.document_id == document_id))
+    session.commit()
+    return True
 
 
 def _invoice_identity(invoice: dict) -> str | None:
@@ -117,7 +193,7 @@ def list_recent(session: Session, query: str) -> list[Document]:
 
 def save_upload(
     session: Session, digest: str, filename: str, invoice: Invoice, note: str | None,
-    source: DecodedDocument, warnings: list[str],
+    source: DecodedDocument, warnings: list[str], *, original: bytes, media_type: str, retention_days: int,
 ) -> tuple[Document, bool]:
     uploaded = audit_entry("Extracted")
     document = Document(
@@ -129,6 +205,8 @@ def save_upload(
     try:
         session.flush()
         session.add(DocumentSource(document_id=document.id, method=source.method, text=source.text))
+        session.add(OriginalSource(document_id=document.id, content=original, media_type=media_type,
+                                   expires_at=(datetime.now(UTC) + timedelta(days=retention_days)).isoformat()))
         session.add(InvoiceIdentity(document_id=document.id, identity=_invoice_identity(document.invoice)))
         session.commit()
         return document, False
