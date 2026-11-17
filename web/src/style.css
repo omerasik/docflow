@@ -73,3 +73,11 @@ th { color: var(--muted); font-size: 11px; font-weight: 640; border-bottom: 1px 
 .login label { width: 100%; }
 @media (max-width: 890px) { .workspace { grid-template-columns: 200px minmax(0, 1fr); } .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 650px) { main { width: calc(100% - 24px); margin-top: 10px; } .masthead { padding: 0 12px; gap: 9px; } .mast-title { padding-left: 9px; font-size: 11px; } .workspace { grid-template-columns: 1fr; } .paper { padding: 12px; } .queue ul { max-height: 180px; overflow: auto; } }
+.search-form { display: grid; gap: 8px; padding: 0 16px 14px; }
+.search-form label { display: grid; gap: 6px; }
+.search-form input { width: 100%; }
+.check-source { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+.source-preview { min-width: 0; padding: 12px; border: 1px solid #ccd5e1; border-radius: 8px; }
+.source-preview pre { margin: 10px 0 0; max-height: 48vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.check-source form { min-width: 0; }
+@media (max-width: 1080px) { .check-source { grid-template-columns: minmax(0, 1fr); } }

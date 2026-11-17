@@ -1,4 +1,6 @@
-from datetime import date
+import re
+from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal
 
@@ -9,6 +11,12 @@ Quantity = Annotated[Decimal, Field(gt=0, max_digits=9, decimal_places=3, allow_
 Label = Annotated[str, Field(min_length=1, max_length=160, pattern=r"^[^\x00-\x1f]+$")]
 Currency = Literal["EUR", "USD", "GBP", "TRY", "CAD", "AUD"]
 cent = Decimal("0.01")
+
+
+@dataclass(frozen=True)
+class ReviewRules:
+    require_customer: bool = False
+    currencies: frozenset[str] = frozenset()
 
 
 class LineItem(BaseModel):
@@ -24,6 +32,8 @@ class Invoice(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     supplier: Label | None = None
+    customer: Label | None = None
+    document_type: Literal["invoice"] | None = None
     invoice_number: Label | None = None
     invoice_date: date | None = None
     currency: Currency | None = None
@@ -40,36 +50,77 @@ class Correction(BaseModel):
     invoice: Invoice
 
 
-def extract_invoice(text: str) -> Invoice:
+def extract_invoice(text: str, *, observed_fields: set[str] | None = None) -> Invoice:
     labels = {
         "supplier": "supplier",
+        "vendor": "supplier",
+        "seller": "supplier",
+        "billed by": "supplier",
+        "customer": "customer",
+        "bill to": "customer",
+        "buyer": "customer",
         "invoice number": "invoice_number",
+        "invoice no": "invoice_number",
+        "invoice #": "invoice_number",
+        "invoice id": "invoice_number",
         "invoice date": "invoice_date",
+        "issued on": "invoice_date",
+        "issue date": "invoice_date",
         "currency": "currency",
         "subtotal": "subtotal",
+        "net amount": "subtotal",
         "tax": "tax",
+        "vat": "tax",
         "total": "total",
+        "amount due": "total",
+        "balance due": "total",
     }
     raw: dict[str, str | None] = {}
     items: list[LineItem] = []
     in_items = False
     for line in text.splitlines():
         line = line.strip()
-        if line.casefold() == "items:":
+        if line.casefold().rstrip(":") in {"items", "line items", "details"}:
             in_items = True
             continue
-        if in_items and "|" in line and len(items) < 60:
-            cells = [cell.strip() or None for cell in line.split("|")]
+        if in_items and ("|" in line or "\t" in line) and len(items) < 60:
+            cells = [cell.strip() or None for cell in re.split(r"\||\t", line)]
             if len(cells) == 4:
+                if cells[0] and cells[0].casefold() == "description":
+                    continue
+                cells[1:] = [_decimal_text(cell) for cell in cells[1:]]
                 fields = dict(zip(("description", "quantity", "unit_price", "amount"), cells, strict=True))
                 items.append(LineItem.model_validate(_with_invalid_fields_dropped(LineItem, fields)))
             continue
-        key, separator, value = line.partition(":")
-        field = labels.get(key.strip().casefold()) if separator else None
+        pair = re.split(r"[:=\t]", line, maxsplit=1)
+        field = labels.get(pair[0].strip().casefold().rstrip(".")) if len(pair) == 2 else None
         if field:
-            candidate = value.strip() or None
+            if observed_fields is not None:
+                observed_fields.add(field)
+            candidate = pair[1].strip() or None
+            if field in {"subtotal", "tax", "total"}:
+                candidate = _decimal_text(candidate)
+            elif field == "currency" and candidate:
+                candidate = candidate.upper()
+            elif field == "invoice_date" and candidate:
+                for layout in ("%Y/%m/%d", "%d.%m.%Y"):
+                    try:
+                        candidate = datetime.strptime(candidate, layout).date().isoformat()
+                        break
+                    except ValueError:
+                        continue
             raw[field] = candidate if field not in raw or candidate == raw[field] else None
+    if "invoice_number" in raw or "invoice_date" in raw:
+        raw["document_type"] = "invoice"
     return Invoice.model_validate({**_with_invalid_fields_dropped(Invoice, raw), "items": items})
+
+
+def _decimal_text(value: str | None) -> str | None:
+    if value and re.fullmatch(r"\d+(?:\.\d{3})*,\d{1,2}", value):
+        return value.replace(".", "").replace(",", ".")
+    if value and re.fullmatch(r"\d{1,3}(?:,\d{3})+\.\d{1,2}", value):
+        return value.replace(",", "")
+    return value
 
 
 def _with_invalid_fields_dropped(model: type[BaseModel], raw: dict[str, str | None]) -> dict[str, str | None]:
@@ -81,12 +132,16 @@ def _with_invalid_fields_dropped(model: type[BaseModel], raw: dict[str, str | No
     return raw
 
 
-def review_issues(invoice: Invoice) -> list[str]:
+def review_issues(invoice: Invoice, rules: ReviewRules = ReviewRules()) -> list[str]:
     issues = [
         f"Missing {field.replace('_', ' ')}."
         for field in ("supplier", "invoice_number", "invoice_date", "currency", "subtotal", "tax", "total")
         if getattr(invoice, field) is None
     ]
+    if rules.require_customer and invoice.customer is None:
+        issues.append("Missing customer.")
+    if invoice.currency and rules.currencies and invoice.currency not in rules.currencies:
+        issues.append(f"Currency {invoice.currency} is excluded by the configured business rule.")
     if not invoice.items:
         issues.append("At least one line item is required.")
     for index, item in enumerate(invoice.items, start=1):

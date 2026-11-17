@@ -35,11 +35,20 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: pip install -r requirements-dev.txt
-      - run: ruff check document_flow tests
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng
+      - run: ruff check document_flow tests samples/generate_scan.py scripts
       - run: pytest -q
         env:
           DOCFLOW_TEST_DATABASE_URL: postgresql+psycopg://docflow_ci:ephemeral-ci-only@127.0.0.1:5432/docflow_ci
+          DOCFLOW_REQUIRE_OCR_TEST: "true"
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - run: pip-audit -r requirements-dev.txt
       - run: npm --prefix web audit --audit-level=moderate
+      - run: docker build -t docflow-ci .
+      - run: docker run -d --name docflow-ci -p 127.0.0.1:18012:8012 -e DEMO_MODE=true -e OCR_ENABLED=true docflow-ci
+      - run: python scripts/smoke.py --url http://127.0.0.1:18012
+      - if: failure()
+        run: docker logs docflow-ci
+      - if: always()
+        run: docker rm -f docflow-ci || true
