@@ -12,6 +12,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY requirements.txt .
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir --upgrade pip==26.3 \
     && pip install --no-cache-dir -r requirements.txt \
     && useradd --create-home docflow && mkdir data && chown docflow:docflow data
 COPY document_flow/ document_flow/
